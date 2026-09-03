@@ -10,6 +10,8 @@ services:
         value: "true"
       - key: TRADING_ENABLED
         value: "false"
+      - key: LIVE_TRADING_ACK
+        value: ""
       - key: DATABASE_PATH
         value: data/scanner.db
       - key: PAPER_INITIAL_CAPITAL_USD

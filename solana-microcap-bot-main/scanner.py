@@ -7,6 +7,7 @@ from risk import detect_risks, risk_score
 from scoring import classification, momentum, opportunity_score, upside_asymmetry_score
 from security import SolanaSecurity
 from storage import Store
+from execution.live_executor import LiveTradingEngine
 
 log = logging.getLogger(__name__)
 
@@ -66,21 +67,31 @@ class Scanner:
         self.store = store or Store(settings.database_path)
         self.source = source or DexScreener(settings.api_url, settings.request_timeout)
         self.security = security or SolanaSecurity(settings.solana_rpc_url, settings.request_timeout)
+        self.live = LiveTradingEngine(self.store)
 
     def scan(self):
         started = datetime.now(timezone.utc).isoformat()
         try:
-            pairs = self.source.fetch_solana_pairs()
+            tracked = {x.get("address") for x in self.store.paper_trades() if x.get("status") == "OPEN"}
+            tracked.update(x.get("address") for x in self.store.live_trades() if x.get("status") == "OPEN")
+            pairs = self.source.fetch_solana_pairs(sorted(x for x in tracked if x))
         except Exception:
             log.exception("Unexpected datasource failure")
             return {"scanned": 0, "accepted": 0, "rejected": 0}
 
-        counts, seen = {"scanned": 0, "accepted": 0, "rejected": 0}, set()
+        counts = {"scanned": 0, "accepted": 0, "rejected": 0}
+        best = {}
         for pair in pairs:
-            token = normalize(pair)
-            if not token["address"] or token["address"] in seen:
+            mint = pair.get("baseToken", {}).get("address", "")
+            if not mint:
                 continue
-            seen.add(token["address"])
+            liq = _num(pair.get("liquidity", {}).get("usd"))
+            if mint not in best or liq > _num(best[mint].get("liquidity", {}).get("usd")):
+                best[mint] = pair
+        for pair in best.values():
+            token = normalize(pair)
+            if not token["address"]:
+                continue
             counts["scanned"] += 1
             eligible = (
                 settings.min_market_cap_usd <= token["market_cap"] <= settings.max_market_cap_usd
@@ -88,7 +99,11 @@ class Scanner:
                 and token["volume_24h"] >= settings.min_volume_24h_usd
                 and token["age_hours"] <= settings.max_pair_age_hours
             )
-            if not eligible:
+            # Entry filters apply to new discoveries. Existing open positions must keep
+            # receiving a real risk/momentum evaluation even after market cap/age leave
+            # the entry range, otherwise a successful runner would be falsely assigned risk=100.
+            is_tracked = token["address"] in tracked
+            if not eligible and not is_tracked:
                 token.update(classification="REJECTED", opportunity_score=0, risk_score=100)
                 counts["rejected"] += 1
             else:
@@ -107,6 +122,7 @@ class Scanner:
                 )
                 counts["accepted"] += 1
             self.store.save(token)
+            self.live.on_token(token)
 
         self.store.set_meta("last_scan_timestamp", started)
         self.store.set_meta("tokens_last_scan", counts["scanned"])

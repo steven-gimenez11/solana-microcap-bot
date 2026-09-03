@@ -18,7 +18,7 @@ class DexScreener:
                 response = self.session.get(
                     self.base_url + path,
                     timeout=self.timeout,
-                    headers={"User-Agent": "solana-microcap-bot/2.0"},
+                    headers={"User-Agent": "solana-microcap-bot/3.0"},
                 )
                 if response.status_code == 429:
                     time.sleep(2 ** attempt)
@@ -39,7 +39,19 @@ class DexScreener:
         data = self._get("/token-boosts/latest/v1")
         return data if isinstance(data, list) else data.get("boosts", [])
 
-    def fetch_solana_pairs(self):
+    def fetch_token_pairs(self, mint, source="tracked"):
+        data = self._get(f"/token-pairs/v1/solana/{mint}")
+        found = data if isinstance(data, list) else data.get("pairs") or []
+        out = []
+        for pair in found:
+            pair = dict(pair)
+            existing = set(pair.get("_discovery_sources") or [])
+            existing.add(source)
+            pair["_discovery_sources"] = sorted(existing)
+            out.append(pair)
+        return out
+
+    def fetch_solana_pairs(self, tracked_mints=None):
         discoveries = OrderedDict()
         for source, rows in (("profile", self._latest_profiles()), ("boost", self._latest_boosts())):
             for row in rows[:60]:
@@ -47,13 +59,14 @@ class DexScreener:
                     continue
                 mint = row["tokenAddress"]
                 discoveries.setdefault(mint, set()).add(source)
+        for mint in tracked_mints or []:
+            if mint:
+                discoveries.setdefault(mint, set()).add("open_position")
 
         pairs = []
-        for mint, sources in list(discoveries.items())[:60]:
-            pair_response = self._get(f"/token-pairs/v1/solana/{mint}")
-            found = pair_response if isinstance(pair_response, list) else pair_response.get("pairs") or []
+        for mint, sources in list(discoveries.items())[:70]:
+            found = self.fetch_token_pairs(mint, source="discovery")
             for pair in found:
-                pair = dict(pair)
-                pair["_discovery_sources"] = sorted(sources)
+                pair["_discovery_sources"] = sorted(set(pair.get("_discovery_sources") or []) | sources)
                 pairs.append(pair)
         return pairs

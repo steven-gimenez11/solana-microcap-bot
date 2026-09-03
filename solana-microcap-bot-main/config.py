@@ -28,13 +28,15 @@ class Settings:
     min_volume_24h_usd: float = _float("MIN_VOLUME_24H_USD", 50000)
     max_pair_age_hours: float = _float("MAX_PAIR_AGE_HOURS", 72)
     min_score: float = _float("MIN_SCORE", 80)
+    max_candidate_risk: float = _float("MAX_CANDIDATE_RISK", 25)
     scan_interval: int = _int("SCAN_INTERVAL", 60)
     database_path: str = os.getenv("DATABASE_PATH", "data/scanner.db")
     dry_run: bool = _bool("DRY_RUN", True)
     trading_enabled: bool = _bool("TRADING_ENABLED", False)
+    live_trading_ack: str = os.getenv("LIVE_TRADING_ACK", "")
     api_url: str = os.getenv("DEXSCREENER_API_URL", "https://api.dexscreener.com")
     solana_rpc_url: str = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-    request_timeout: float = _float("REQUEST_TIMEOUT_SECONDS", 10)
+    request_timeout: float = _float("REQUEST_TIMEOUT_SECONDS", 12)
 
     paper_initial_capital_usd: float = _float("PAPER_INITIAL_CAPITAL_USD", 10)
     max_total_capital_usd: float = _float("MAX_TOTAL_CAPITAL_USD", 10)
@@ -46,8 +48,29 @@ class Settings:
     take_profit_2_multiple: float = _float("TAKE_PROFIT_2_MULTIPLE", _float("TAKE_PROFIT_2", 10))
     moonbag_enabled: bool = _bool("MOONBAG_ENABLED", True)
 
+    jupiter_api_url: str = os.getenv("JUPITER_API_URL", "https://api.jup.ag")
+    jupiter_api_key: str = os.getenv("JUPITER_API_KEY", "")
+    solana_private_key_b58: str = os.getenv("SOLANA_PRIVATE_KEY_B58", "")
+    max_price_impact_pct: float = _float("MAX_PRICE_IMPACT_PCT", 5.0)
+    min_sol_reserve: float = _float("MIN_SOL_RESERVE", 0.003)
+    live_entry_cooldown_hours: float = _float("LIVE_ENTRY_COOLDOWN_HOURS", 24)
+    live_min_asymmetry_score: float = _float("LIVE_MIN_ASYMMETRY_SCORE", 70)
+    live_min_momentum_score: float = _float("LIVE_MIN_MOMENTUM_SCORE", 55)
+
+    @property
+    def live_mode(self):
+        return (
+            self.trading_enabled
+            and not self.dry_run
+            and self.live_trading_ack == "I_ACCEPT_REAL_LOSS_RISK"
+        )
+
 
 settings = Settings()
 
-if settings.trading_enabled or not settings.dry_run:
-    raise RuntimeError("This version is DRY-RUN only: keep DRY_RUN=true and TRADING_ENABLED=false")
+# Fail closed: accidental env changes can never enable trading without the explicit acknowledgement.
+if settings.trading_enabled and not settings.live_mode:
+    raise RuntimeError(
+        "TRADING_ENABLED=true requires DRY_RUN=false and "
+        "LIVE_TRADING_ACK=I_ACCEPT_REAL_LOSS_RISK"
+    )

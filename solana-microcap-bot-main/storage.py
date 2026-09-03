@@ -41,6 +41,12 @@ class Store:
                     id INTEGER PRIMARY KEY, address TEXT, entry_price REAL, entry_market_cap REAL,
                     entry_at TEXT, data TEXT
                 );
+                CREATE TABLE IF NOT EXISTS live_trades (
+                    id INTEGER PRIMARY KEY, address TEXT, entry_at TEXT, data TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS live_events (
+                    id INTEGER PRIMARY KEY, address TEXT, created_at TEXT, event_type TEXT, message TEXT
+                );
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
@@ -250,6 +256,143 @@ class Store:
             "near_zero": sum(float(x.get("current_return_pct") or 0) <= -90 for x in trades),
         }
 
+
+    # ----- Live trading persistence (V3) -----
+    def live_trades(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT id,data FROM live_trades ORDER BY id DESC").fetchall()
+        out = []
+        for row in rows:
+            item = json.loads(row["data"])
+            item["id"] = row["id"]
+            out.append(item)
+        return out
+
+    def get_live_trade_by_id(self, trade_id):
+        with self.connect() as db:
+            row = db.execute("SELECT id,data FROM live_trades WHERE id=?", (trade_id,)).fetchone()
+        if not row:
+            return None
+        item = json.loads(row["data"]); item["id"] = row["id"]
+        return item
+
+    def get_open_live_trade(self, address):
+        for item in self.live_trades():
+            if item.get("address") == address and item.get("status") == "OPEN":
+                return item
+        return None
+
+    def open_live_count(self):
+        return sum(x.get("status") == "OPEN" for x in self.live_trades())
+
+    def live_recently_traded(self, address, cooldown_hours):
+        cutoff = float(cooldown_hours) * 3600
+        current = datetime.now(timezone.utc)
+        for item in self.live_trades():
+            if item.get("address") != address:
+                continue
+            try:
+                entered = datetime.fromisoformat(item.get("entry_at"))
+                if (current - entered).total_seconds() < cutoff:
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def add_live_event(self, address, event_type, message):
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO live_events(address,created_at,event_type,message) VALUES(?,?,?,?)",
+                (address, now(), event_type, str(message)[:2000]),
+            )
+
+    def live_events(self, limit=100):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT address,created_at,event_type,message FROM live_events ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_live_trade(self, token, execution, raw_out, reason):
+        result = execution.get("result") or {}
+        order = execution.get("order") or {}
+        address = token.get("address")
+        if not address or self.get_open_live_trade(address):
+            return False
+        if self.open_live_count() >= settings.max_open_positions:
+            return False
+        item = {
+            "status": "OPEN", "address": address, "symbol": token.get("symbol", "UNKNOWN"),
+            "entry_at": now(), "entry_price": float(token.get("price_usd") or 0),
+            "entry_market_cap": float(token.get("market_cap") or 0),
+            "entry_usd": float(execution.get("usd_amount") or settings.max_position_usd),
+            "entry_raw_amount": int(raw_out), "remaining_raw_amount": int(raw_out),
+            "highest_price": float(token.get("price_usd") or 0), "current_price": float(token.get("price_usd") or 0),
+            "multiple": 1.0, "drawdown_from_peak_pct": 0.0, "why_entered": reason,
+            "why_exited": None, "partial_exits": [], "milestones": {},
+            "entry_signature": result.get("signature"), "router": order.get("router"),
+            "token": token,
+        }
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO live_trades(address,entry_at,data) VALUES(?,?,?)",
+                (address, item["entry_at"], json.dumps(item)),
+            )
+        self.add_live_event(address, "BUY_SUCCESS", result.get("signature") or "success")
+        return True
+
+    def _update_live_json(self, trade_id, item):
+        clean = dict(item); clean.pop("id", None)
+        with self.connect() as db:
+            db.execute("UPDATE live_trades SET data=? WHERE id=?", (json.dumps(clean), trade_id))
+
+    def mark_live_price(self, trade_id, token, current, peak, multiple, drawdown_peak):
+        item = self.get_live_trade_by_id(trade_id)
+        if not item or item.get("status") != "OPEN":
+            return False
+        item["current_price"] = float(current)
+        item["highest_price"] = float(peak)
+        item["multiple"] = round(float(multiple), 5)
+        item["drawdown_from_peak_pct"] = round(float(drawdown_peak), 2)
+        item["token"] = token
+        for label, target in (("2x",2),("5x",5),("10x",10),("20x",20),("50x",50),("100x",100)):
+            if multiple >= target and label not in item.setdefault("milestones", {}):
+                item["milestones"][label] = {"timestamp": now()}
+        self._update_live_json(trade_id, item)
+        return True
+
+    def record_live_sale(self, trade_id, token, raw_sold, execution, reason):
+        item = self.get_live_trade_by_id(trade_id)
+        if not item or item.get("status") != "OPEN":
+            return False
+        raw_sold = min(int(raw_sold), int(item.get("remaining_raw_amount") or 0))
+        item["remaining_raw_amount"] = max(0, int(item.get("remaining_raw_amount") or 0) - raw_sold)
+        result = execution.get("result") or {}
+        item.setdefault("partial_exits", []).append({
+            "timestamp": now(), "reason": reason, "raw_amount": raw_sold,
+            "price": float(token.get("price_usd") or 0), "signature": result.get("signature"),
+            "output_amount_result": result.get("outputAmountResult") or result.get("totalOutputAmount"),
+        })
+        if item["remaining_raw_amount"] <= 0:
+            item["status"] = "CLOSED"
+            item["closed_at"] = now()
+            item["why_exited"] = reason
+        self._update_live_json(trade_id, item)
+        self.add_live_event(item.get("address"), "SELL_SUCCESS", f"{reason}: {result.get('signature') or 'success'}")
+        return True
+
+    def live_stats(self):
+        trades = self.live_trades()
+        return {
+            "enabled": settings.live_mode,
+            "open_positions": sum(x.get("status") == "OPEN" for x in trades),
+            "closed_positions": sum(x.get("status") == "CLOSED" for x in trades),
+            "total_trades": len(trades),
+            "max_position_usd": settings.max_position_usd,
+            "max_open_positions": settings.max_open_positions,
+        }
+
     def get_debug(self):
         return {
             "scanner_running": bool(self.get_meta("last_scan_timestamp")),
@@ -262,4 +405,6 @@ class Store:
             "trading_enabled": settings.trading_enabled,
             "paper_executor_enabled": True,
             "open_paper_positions": self.open_paper_count(),
+            "live_mode": settings.live_mode,
+            "open_live_positions": self.open_live_count(),
         }
