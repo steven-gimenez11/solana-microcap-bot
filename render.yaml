@@ -4,25 +4,34 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: python -u worker.py & exec gunicorn --workers 1 --threads 4 app:app
     envVars:
       - key: DRY_RUN
         value: "true"
       - key: TRADING_ENABLED
         value: "false"
+      - key: LIVE_TRADING_ACK
+        value: ""
       - key: DATABASE_PATH
         value: data/scanner.db
+      - key: PAPER_INITIAL_CAPITAL_USD
+        value: "10"
+      - key: MAX_TOTAL_CAPITAL_USD
+        value: "10"
+      - key: MAX_POSITION_USD
+        value: "1"
+      - key: MAX_OPEN_POSITIONS
+        value: "3"
+      - key: MIN_MARKET_CAP_USD
+        value: "50000"
+      - key: MAX_MARKET_CAP_USD
+        value: "1500000"
+      - key: CAPITAL_RECOVERY_MULTIPLE
+        value: "2"
+      - key: TAKE_PROFIT_1_MULTIPLE
+        value: "5"
+      - key: TAKE_PROFIT_2_MULTIPLE
+        value: "10"
+      - key: MOONBAG_ENABLED
+        value: "true"
     healthCheckPath: /health
-  - type: worker
-    name: solana-microcap-bot-worker
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python worker.py
-    envVars:
-      - key: DRY_RUN
-        value: "true"
-      - key: TRADING_ENABLED
-        value: "false"
-      - key: DATABASE_PATH
-        value: data/scanner.db
