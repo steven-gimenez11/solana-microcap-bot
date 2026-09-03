@@ -24,20 +24,20 @@ PAGE = '''<!doctype html>
   <div class="wrap">
     <h1>Solana Microcap Scanner</h1>
     <div class="metrics">
-      <div class="card">Tokens scanned: {{ metrics['tokens scanned'] }}</div>
+      <div class="card">Tokens scanned: {{ metrics['tokens_scanned'] }}</div>
       <div class="card">Watchlist: {{ metrics['watchlist'] }}</div>
-      <div class="card">Strong watch: {{ metrics['strong watch'] }}</div>
+      <div class="card">Strong watch: {{ metrics['strong_watch'] }}</div>
       <div class="card">Candidates: {{ metrics['candidates'] }}</div>
     </div>
 
     <h2 style="margin-top:20px">Paper Portfolio</h2>
     <div class="metrics">
-      <div class="card">Capital initial virtual: ${{ portfolio.capital_initial }}</div>
-      <div class="card">Cash virtual: ${{ portfolio.cash }}</div>
-      <div class="card">Capital invested: ${{ portfolio.capital_invested }}</div>
-      <div class="card">Portfolio value: ${{ portfolio.portfolio_value }}</div>
-      <div class="card">Total PnL: ${{ portfolio.total_pnl }}</div>
-      <div class="card">ROI %: {{ portfolio.roi_pct }}</div>
+      <div class="card">Capital inicial: ${{ portfolio.capital_initial }}</div>
+      <div class="card">Cash: ${{ portfolio.cash }}</div>
+      <div class="card">Invertido: ${{ portfolio.capital_invested }}</div>
+      <div class="card">Valor: ${{ portfolio.portfolio_value }}</div>
+      <div class="card">PnL: ${{ portfolio.total_pnl }}</div>
+      <div class="card">ROI: {{ portfolio.roi_pct }}%</div>
     </div>
 
     <div class="tokens">
@@ -47,11 +47,11 @@ PAGE = '''<!doctype html>
         <tbody>
         {% for t in tokens %}
           <tr>
-            <td>{{ t['symbol'] }}</td>
-            <td>{{ t['name'] }}</td>
-            <td>{{ t.get('opportunity_score') }}</td>
-            <td>{{ t.get('risk_score') }}</td>
-            <td>{{ t.get('classification') }}</td>
+            <td>{{ t['symbol'] or 'N/A' }}</td>
+            <td>{{ t['name'] or 'N/A' }}</td>
+            <td>{{ t.get('opportunity_score', 0) }}</td>
+            <td>{{ t.get('risk_score', 0) }}</td>
+            <td>{{ t.get('classification', 'REJECTED') }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -66,22 +66,33 @@ PAGE = '''<!doctype html>
 def index():
     all_tokens = scanner.store.latest()
     tokens = [x for x in all_tokens if x.get("classification") in {"WATCH", "STRONG_WATCH", "CANDIDATE"}]
-    metrics = {"tokens scanned": len(all_tokens), "watchlist": sum(x.get("classification") == "WATCH" for x in tokens), "strong watch": sum(x.get("classification") == "STRONG_WATCH" for x in tokens), "candidates": sum(x.get("classification") == "CANDIDATE" for x in tokens)}
+    metrics = {
+        "tokens_scanned": len(all_tokens),
+        "watchlist": sum(1 for x in tokens if x.get("classification") == "WATCH"),
+        "strong_watch": sum(1 for x in tokens if x.get("classification") == "STRONG_WATCH"),
+        "candidates": sum(1 for x in tokens if x.get("classification") == "CANDIDATE")
+    }
     portfolio = scanner.store.paper_stats()
-    # expose portfolio fields conveniently to template
+    
     class P: pass
     p = P()
-    p.capital_initial = portfolio.get('capital_initial')
-    p.cash = portfolio.get('cash')
-    p.capital_invested = portfolio.get('capital_invested')
-    p.portfolio_value = portfolio.get('portfolio_value')
-    p.total_pnl = portfolio.get('total_pnl')
-    p.roi_pct = portfolio.get('roi_pct')
+    p.capital_initial = portfolio.get('capital_initial', 0)
+    p.cash = portfolio.get('cash', 0)
+    p.capital_invested = portfolio.get('capital_invested', 0)
+    p.portfolio_value = portfolio.get('portfolio_value', 0)
+    p.total_pnl = portfolio.get('total_pnl', 0)
+    p.roi_pct = portfolio.get('roi_pct', 0)
+    
     return render_template_string(PAGE, tokens=tokens[:100], metrics=metrics, portfolio=p)
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "mode": "DRY_RUN" if scanner.store else "unknown", "trading_enabled": settings.trading_enabled})
+    return jsonify({
+        "status": "ok",
+        "mode": "DRY_RUN",
+        "trading_enabled": settings.trading_enabled,
+        "database": settings.database_path
+    })
 
 @app.get("/api/scan")
 def api_scan():
@@ -105,7 +116,6 @@ def stats():
 
 @app.get("/api/debug")
 def api_debug():
-    # return scanner debug info; never include secrets
     return jsonify(scanner.store.get_debug())
 
 if __name__ == "__main__":
