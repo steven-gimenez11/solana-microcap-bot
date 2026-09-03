@@ -1,6 +1,0 @@
-Flask>=3.0,<4
-requests>=2.31,<3
-gunicorn>=21,<24
-pytest>=8,<9
-solders>=0.26,<1
-base58>=2.1,<3

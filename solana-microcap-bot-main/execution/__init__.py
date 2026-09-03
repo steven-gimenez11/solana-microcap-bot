@@ -1,1 +1,0 @@
-"""Only paper simulation exists in v1; no real executor is provided."""
